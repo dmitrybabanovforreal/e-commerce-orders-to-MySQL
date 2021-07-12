@@ -10,7 +10,7 @@ def get_token(platform):
     # Update the access_token if it's expired
     if datetime.datetime.utcnow() > datetime.datetime.fromisoformat(config[platform]['best_before']):
         url = config[platform]['refresh_url']
-        if config[platform] == 'amazon':
+        if platform == 'amazon':
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
             }
@@ -47,19 +47,19 @@ config = json.load(open('config.json'))
 
 # define the application path and create the logging object
 application_path = os.path.abspath(os.path.dirname(__file__))
-logs_path = os.path.join(application_path, 'logs for the last 20 days')
-if logs_path not in os.listdir(application_path):
-    os.mkdir(logs_path)
+logs_folder = 'logs for the last 20 days'
+if logs_folder not in os.listdir(application_path):
+    os.mkdir(logs_folder)
 
-logName = os.path.join(logs_path, 'log ' + datetime.datetime.now().strftime('%Y-%m-%d') + '.txt')
+logName = os.path.join(application_path, logs_folder, 'log ' + datetime.datetime.now().strftime('%Y-%m-%d') + '.txt')
 logging.basicConfig(filename=logName, level=logging.INFO, format=' %(asctime)s -  %(levelname)s -  %(message)s')
 
 # Remove logs older than 20 days
-for fileName in os.listdir(logs_path):
+for fileName in os.listdir(os.path.join(application_path, logs_folder)):
     try:
         logDate = datetime.datetime.strptime(fileName[4:-4], '%Y-%m-%d')
         if logDate < (datetime.datetime.now() - datetime.timedelta(days=10)):
-            os.remove(os.path.join(logs_path, fileName))
+            os.remove(os.path.join(os.path.join(application_path, logs_folder), fileName))
     except:
         continue
 
@@ -77,10 +77,11 @@ try:
         connection.execute(text(
             f"""CREATE TABLE IF NOT EXISTS orders
             (
+            id INT NOT NULL AUTO_INCREMENT,
             order_id VARCHAR(32),
             platform VARCHAR(8),
             creation_date VARCHAR(32),
-            customer_name VARCHAR(64),
+            customer_name VARCHAR(128),
             
             subtotal_amount DECIMAL(9,2),
             discount_amount DECIMAL(9,2),
@@ -88,20 +89,21 @@ try:
             tax_amount DECIMAL(9,2),
             total_amount DECIMAL(9,2),
         
-            CONSTRAINT order_id PRIMARY KEY (order_id)
+            PRIMARY KEY (id)
             );"""
         ))
         # Line items
         connection.execute(text(
             f"""CREATE TABLE IF NOT EXISTS line_items
             (
+            id INT NOT NULL AUTO_INCREMENT,
             line_id VARCHAR(32),
             order_id VARCHAR(32),
-            sku VARCHAR(32),
-            title VARCHAR(64),
+            sku VARCHAR(64),
+            title VARCHAR(256),
             quantity SMALLINT,
             total_amount DECIMAL(9,2),
-            CONSTRAINT line_id PRIMARY KEY (line_id)
+            PRIMARY KEY (id)
             );"""
         ))
 except:
@@ -158,7 +160,7 @@ try:
             'order_id': str(order['orderId']),
             'platform': 'ebay',
             'creation_date': order['creationDate'].strip('Z'),  # saves UTC ISO timestamp, example: 2015-08-04T19:09:02.768
-            'customer_name': order['buyer']['username'],
+            'customer_name': order['buyer']['username'][:128],
             'subtotal_amount': order['pricingSummary'].get('priceSubtotal', 0),
             'discount_amount': order['pricingSummary'].get('priceDiscountSubtotal', 0),
             'delivery_amount': order['pricingSummary'].get('deliveryCost', 0),
@@ -170,7 +172,7 @@ try:
                 'line_id': str(item['lineItemId']),
                 'order_id': order['orderId'],
                 'sku': item.get('sku', ''),
-                'title': item['title'],
+                'title': item['title'][:256],
                 'quantity': item['quantity'],
                 'total_amount': float(item['total']['value']),
             })
@@ -233,7 +235,7 @@ try:
 
     # How to get the keys: https://docs.woocommerce.com/document/woocommerce-rest-api/
     wcapi = API(
-        url=config['wc']['url'],
+        url=config['wc']['store url'],
         consumer_key=config['wc']['consumer_key'],
         consumer_secret=config['wc']['consumer_secret'],
         wp_api=True,
@@ -272,7 +274,7 @@ try:
             'order_id': order['number'],
             'platform': 'wc',
             'creation_date': order['date_created_gmt'].strip('Z'),  # saves UTC ISO timestamp, example: 2015-08-04T19:09:02
-            'customer_name': str(order['customer_id']),
+            'customer_name': str(order['customer_id'])[:128],
             'subtotal_amount': subtotal,
             'discount_amount': discount,
             'delivery_amount': delivery,
@@ -284,7 +286,7 @@ try:
                 'line_id': str(item['id']),
                 'order_id': order['number'],
                 'sku': item.get('sku', ''),
-                'title': item['name'],
+                'title': item['name'][:256],
                 'quantity': item['quantity'],
                 'total_amount': float(item['total']),
             })
