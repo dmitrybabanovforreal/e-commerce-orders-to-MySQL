@@ -1,11 +1,12 @@
 from flask import Flask, request, redirect
-import requests, base64, json, datetime
+import requests, base64, json, datetime, os
 
 app = Flask(__name__)
 
-config = json.load(open('config.json'))
+application_path = os.path.dirname(__file__)
+config = json.load(open(os.path.join(application_path, 'config.json')))
 
-@app.route(config.config['ebay']['auth_slug'])
+@app.route(config['ebay']['auth_slug'])
 def ebay_authorization():
     # eBay docs: https://developer.ebay.com/api-docs/static/oauth-authorization-code-grant.html
     # check if user returned from the authorization page with the code
@@ -21,7 +22,7 @@ def ebay_authorization():
             'redirect_uri': config['redirect_uri'] + config['ebay']['auth_slug'],
             'grant_type': 'authorization_code'
         }
-        response = requests.post(f'https://api.sandbox.ebay.com/identity/v1/oauth2/token', data=payload, headers=headers)
+        response = requests.post(f'https://api.ebay.com/identity/v1/oauth2/token', data=payload, headers=headers)
 
         config['ebay']['access_token'] = response.json()['access_token']
         config['ebay']['refresh_token'] = response.json()['refresh_token']
@@ -34,7 +35,7 @@ def ebay_authorization():
 
     else:
         # send the authorization request to get the code
-        redirectUrl = f'https://auth.sandbox.ebay.com/oauth2/authorize?' \
+        redirectUrl = f'https://auth.ebay.com/oauth2/authorize?' \
                       f'client_id={config["ebay"]["id"]}&' \
                       f'redirect_uri={config["redirect_uri"]}{config["ebay"]["auth_slug"]}&' \
                       f'response_type=code&' \
@@ -45,4 +46,7 @@ def ebay_authorization():
 
 @app.route('/')
 def hello_world():
-    return 'Hello World!'
+    return 'Hello World, everyone!'
+
+if __name__ == '__main__':
+    app.run()
