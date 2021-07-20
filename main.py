@@ -1,4 +1,8 @@
+import time
+
 import requests, datetime, json, base64, os, traceback, logging
+from decimal import Decimal
+
 from sqlalchemy import create_engine, text, MetaData, Table
 from woocommerce import API
 
@@ -6,6 +10,7 @@ from woocommerce import API
 def get_token(platform):
     # eBay docs: https://developer.ebay.com/api-docs/static/oauth-refresh-token-request.html
     # Amazon docs: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md#step-1-request-a-login-with-amazon-access-token
+    config = json.load(open(os.path.join(application_path, 'config.json')))
 
     # Update the access_token if it's expired
     if datetime.datetime.utcnow() > datetime.datetime.fromisoformat(config[platform]['best_before']):
@@ -24,7 +29,8 @@ def get_token(platform):
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Authorization': 'Basic ' + str(
-                    base64.b64encode((config[platform]['id'] + ':' + config[platform]['secret']).encode('utf-8')), 'utf-8')
+                    base64.b64encode((config[platform]['id'] + ':' +
+                                      config[platform]['secret']).encode('utf-8')), 'utf-8')
             }
             data = {
                 'grant_type': 'refresh_token',
@@ -39,14 +45,53 @@ def get_token(platform):
                                            - datetime.timedelta(seconds=300)).isoformat()
 
         # Save the new credentials
-        json.dump(config, open('config.json', 'w'))
+        json.dump(config, open(os.path.join(application_path, 'config.json'), 'w'))
 
     return config[platform]['access_token']
 
-config = json.load(open('config.json'))
 
-# define the application path and create the logging object
+def amazon_get_resource(url, params, resource):
+    items = []
+
+    headers = {
+        'Authorization': 'Bearer ' + get_token('amazon')
+    }
+
+    # Amazon docs about requests frequency: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/usage-plans-rate-limits/Usage-Plans-and-Rate-Limits.md
+    delay = 10
+    while True:
+        response = requests.get(url, params=params, headers=headers)
+        if response.status_code == 429:
+            # If code is 429, Amazon throttles the API. We can try calling it again in a while
+            print(f'Amazon API throttles the requests, waiting {str(delay)} seconds to call API again')
+            time.sleep(delay)
+            delay *= 2
+            continue
+        else:
+            # For other cases, check for errors and exit the loop
+            response.raise_for_status()
+            break
+
+    for item in response.json()[resource]:
+        items.append(item)
+
+    # Continue getting the rest of the orders if there is a next page
+    while response.json().get('NextToken'):
+        headers = {
+            'Authorization': 'Bearer ' + get_token('amazon')
+        }
+        params['NextToken'] = response.json().get('NextToken')
+        response = requests.get(url, params=params, headers=headers)
+        for item in response.json()[resource]:
+            items.append(item)
+
+    return items
+
+
 application_path = os.path.abspath(os.path.dirname(__file__))
+config = json.load(open(os.path.join(application_path, 'config.json')))
+
+# Create the logging object
 logs_folder = 'logs for the last 20 days'
 if logs_folder not in os.listdir(application_path):
     os.mkdir(logs_folder)
@@ -72,8 +117,8 @@ try:
                            f"{config['mysql']['database']}")
 
     # Create the new tables if they don't already exist
-    # Orders
     with engine.connect() as connection:
+        # Orders
         connection.execute(text(
             f"""CREATE TABLE IF NOT EXISTS orders
             (
@@ -159,7 +204,8 @@ try:
         ordersToInsert.append({
             'order_id': str(order['orderId']),
             'platform': 'ebay',
-            'creation_date': order['creationDate'].strip('Z'),  # saves UTC ISO timestamp, example: 2015-08-04T19:09:02.768
+            'creation_date': order['creationDate'].strip('Z'),
+            # saves UTC ISO timestamp, example: 2015-08-04T19:09:02.768
             'customer_name': order['buyer']['username'][:128],
             'subtotal_amount': order['pricingSummary'].get('priceSubtotal', 0),
             'discount_amount': order['pricingSummary'].get('priceDiscountSubtotal', 0),
@@ -178,52 +224,7 @@ try:
             })
 except:
     logging.error(traceback.format_exc())
-    print(traceback.format_exc())
-
-# Amazon orders
-try:
-    # How to register a private app: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md
-    # Get the list of Amazon order IDs from the database to know when to stop pagination
-    with engine.connect() as connection:
-        result = connection.execute(text("SELECT order_id FROM orders WHERE platform='amazon';"))
-    orderIds = list(row['order_id'] for row in result.fetchall())
-
-    # Collect Amazon orders from Orders API
-    orders = []
-    # API docs: https://github.com/amzn/selling-partner-api-docs/blob/main/references/orders-api/ordersV0.md#getorders
-    # How to get refresh token: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md#Self-authorization
-    url = 'https://sellingpartnerapi-na.amazon.com/orders/v0/orders'
-    headers = {
-        'Authorization': 'Bearer ' + get_token('amazon')
-    }
-    # response = requests.get(url, headers=headers)
-    # mayBeMoreOrders = True
-    # for order in response.json()['orders']:
-    #     # Include only those orders not found in the database
-    #     if order['orderId'] in orderIds:
-    #         mayBeMoreOrders = False
-    #         break
-    #     else:
-    #         mayBeMoreOrders = True
-    #         orders.append(order)
-    #
-    # # Continue getting the rest of the orders if there is a next page
-    # while response.json().get('next') and mayBeMoreOrders:
-    #     url = response.json().get('next')
-    #     headers = {
-    #         'Authorization': 'Bearer ' + get_token('ebay')
-    #     }
-    #     response = requests.get(url, headers=headers)
-    #     for order in response.json()['orders']:
-    #         # Include only those orders not found in the database
-    #         if order['orderId'] in orderIds:
-    #             mayBeMoreOrders = False
-    #             break
-    #         else:
-    #             mayBeMoreOrders = True
-    #             orders.append(order)
-except:
-    logging.error(traceback.format_exc())
+    print('\n\nError in eBay execution')
     print(traceback.format_exc())
 
 # WooCommerce orders
@@ -241,7 +242,7 @@ try:
         wp_api=True,
         version="wc/v3",
         query_string_auth=True
-        )
+    )
 
     # API docs: https://woocommerce.github.io/woocommerce-rest-api-docs/?python#list-all-orders
     i = 0
@@ -269,11 +270,13 @@ try:
         delivery = float(order['shipping_total'])
         tax = float(order['total_tax'])
         total = float(order['total'])
-        subtotal = (total * 100 - tax * 100 - delivery * 100 + discount * 100) / 100  # calculating in integer numbers to avoid rounding errors
+        subtotal = (
+                           total * 100 - tax * 100 - delivery * 100 + discount * 100) / 100  # calculating in integer numbers to avoid rounding errors
         ordersToInsert.append({
             'order_id': order['number'],
             'platform': 'wc',
-            'creation_date': order['date_created_gmt'].strip('Z'),  # saves UTC ISO timestamp, example: 2015-08-04T19:09:02
+            'creation_date': order['date_created_gmt'].strip('Z'),
+            # saves UTC ISO timestamp, example: 2015-08-04T19:09:02
             'customer_name': str(order['customer_id'])[:128],
             'subtotal_amount': subtotal,
             'discount_amount': discount,
@@ -292,6 +295,7 @@ try:
             })
 except:
     logging.error(traceback.format_exc())
+    print('\n\nError in WooCommerce execution')
     print(traceback.format_exc())
 
 try:
@@ -304,4 +308,97 @@ try:
         connection.execute(lineItemsTable.insert(), lineItemsToInsert)
 except:
     logging.error(traceback.format_exc())
+    print(traceback.format_exc())
+
+# Amazon orders
+try:
+    # How to register a private app: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md
+    # Get the list of Amazon order IDs from the database to know when to stop pagination
+    with engine.connect() as connection:
+        result = connection.execute(text("SELECT order_id FROM orders WHERE platform='amazon';"))
+    orderIds = list(row['order_id'] for row in result.fetchall())
+
+    # Collect Amazon orders from Orders API
+    # API docs: https://github.com/amzn/selling-partner-api-docs/blob/main/references/orders-api/ordersV0.md#getorders
+    # How to get the refresh token: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md#Self-authorization
+    url = 'https://sellingpartnerapi-na.amazon.com/orders/v0/orders'
+    getOrdersAfter = config['amazon'].get('get orders after')
+    if getOrdersAfter:
+        params = {
+            'CreatedAfter': getOrdersAfter
+        }
+    else:
+        params = {}
+
+    items = amazon_get_resource(url, params, 'Orders')
+
+    orders = []
+    for order in items:
+        # Include only those orders not found in the database
+        if not order['AmazonOrderId'] in orderIds:
+            orders.append(order)
+
+    # Find the last order creation time
+    getOrdersAfter = '2001-01-01T00:00:00'  # set the default in case it is the first run
+    for order in orders:
+        if datetime.datetime.fromisoformat(order['PurchaseDate']) > datetime.datetime.fromisoformat(getOrdersAfter):
+            getOrdersAfter = order['PurchaseDate']
+
+    # Save the last order creation time to the config file
+    config['amazon']['get orders after'] = getOrdersAfter
+    json.dump(config, open(os.path.join(application_path, 'config.json'), 'w'))
+
+    # For each order, create the dictionary in the destination table format
+    for order in orders:
+        # Get the line items for this order
+        url = f'https://sellingpartnerapi-na.amazon.com/orders/v0/orders/{order["AmazonOrderId"]}/orderItems'
+        params = {}
+        lineItems = amazon_get_resource(url, params, 'OrderItems')
+
+        # Set the initial values for order figures calculation
+        subtotal = Decimal(0)
+        discount = Decimal(0)
+        delivery = Decimal(0)
+        tax = Decimal(0)
+
+        for item in lineItems:
+            itemSubtotal = Decimal(item.get('ItemPrice', {'Amount': 0})['Amount']) * Decimal(item['QuantityOrdered'])
+            itemDiscount = Decimal(item.get('PromotionDiscount', {'Amount': 0})['Amount'])
+            itemDelivery = Decimal(item.get('ShippingPrice', {'Amount': 0})['Amount']) + \
+                           Decimal(item.get('ShippingDiscount', {'Amount': 0})['Amount'])
+            itemTax = Decimal(item.get('ItemTax', {'Amount': 0})['Amount']) * Decimal(item['QuantityOrdered']) + \
+                      Decimal(item.get('ShippingTax', {'Amount': 0})['Amount']) - \
+                      Decimal(item.get('ShippingDiscountTax', {'Amount': 0})['Amount']) - \
+                      Decimal(item.get('PromotionDiscountTax', {'Amount': 0})['Amount'])
+
+            itemTotal = itemSubtotal - itemDiscount + itemDelivery + itemTax
+
+            lineItemsToInsert.append({
+                'line_id': str(item['OrderItemId']),
+                'order_id': order['AmazonOrderId'],
+                'sku': item.get('SellerSKU', ''),
+                'title': item['Title'][:256],
+                'quantity': item['QuantityOrdered'],
+                'total_amount': round(float(itemTotal), 2),
+            })
+
+            subtotal += itemSubtotal
+            discount += itemDiscount
+            delivery += itemDelivery
+            tax += itemTax
+
+        ordersToInsert.append({
+            'order_id': str(order['AmazonOrderId']),
+            'platform': 'amazon',
+            'creation_date': order['PurchaseDate'].strip('Z'),  # saves UTC ISO timestamp, example: 2015-08-04T19:09:02.768
+            'customer_name': order['FulfillmentInstruction']['Name'][:128],
+            'subtotal_amount': round(float(subtotal), 2),
+            'discount_amount': round(float(discount), 2),
+            'delivery_amount': round(float(delivery), 2),
+            'tax_amount': round(float(tax), 2),
+            'total_amount': float(order['OrderTotal']['Amount']),
+        })
+except:
+    logging.error(traceback.format_exc())
+    print('\n\nError in Amazon execution')
     print(traceback.format_exc())
