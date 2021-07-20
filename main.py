@@ -209,11 +209,11 @@ try:
             'creation_date': order['creationDate'].strip('Z'),
             # saves UTC ISO timestamp, example: 2015-08-04T19:09:02.768
             'customer_name': order['buyer']['username'][:128],
-            'subtotal_amount': order['pricingSummary'].get('priceSubtotal', 0),
-            'discount_amount': order['pricingSummary'].get('priceDiscountSubtotal', 0),
-            'delivery_amount': order['pricingSummary'].get('deliveryCost', 0),
-            'tax_amount': order['pricingSummary'].get('tax', 0),
-            'total_amount': order['pricingSummary'].get('total', 0),
+            'subtotal_amount': float(order['pricingSummary'].get('priceSubtotal', {'value': '0.0'})['value']),
+            'discount_amount': float(order['pricingSummary'].get('priceDiscountSubtotal', {'value': '0.0'})['value']),
+            'delivery_amount': float(order['pricingSummary'].get('deliveryCost', {'value': '0.0'})['value']),
+            'tax_amount': float(order['pricingSummary'].get('tax', {'value': '0.0'})['value']),
+            'total_amount': float(order['pricingSummary'].get('total', {'value': '0.0'})['value'])
         })
         for item in order['lineItems']:
             lineItemsToInsert.append({
