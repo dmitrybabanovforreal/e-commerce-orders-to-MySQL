@@ -151,6 +151,7 @@ try:
             PRIMARY KEY (id)
             );"""
         ))
+    print('Tables in the database created (or they already exist)')
 except:
     logging.error(traceback.format_exc())
     raise Exception(traceback.format_exc())
@@ -198,6 +199,7 @@ try:
             else:
                 mayBeMoreOrders = True
                 orders.append(order)
+    print('Orders from eBay obtained')
 
     # For each order, create the dictionary in the destination table format
     for order in orders:
@@ -224,7 +226,7 @@ try:
             })
 except:
     logging.error(traceback.format_exc())
-    print('\n\nError in eBay execution')
+    print('\n\nError in eBay execution\n\n')
     print(traceback.format_exc())
 
 # WooCommerce orders
@@ -263,6 +265,7 @@ try:
         # If less than 100 orders is returned, this is the last page
         if len(response) < 100:
             mayBeMoreOrders = False
+    print('Orders from WooCommerce obtained')
 
     # For each order, create the dictionary in the destination table format
     for order in orders:
@@ -270,8 +273,7 @@ try:
         delivery = float(order['shipping_total'])
         tax = float(order['total_tax'])
         total = float(order['total'])
-        subtotal = (
-                           total * 100 - tax * 100 - delivery * 100 + discount * 100) / 100  # calculating in integer numbers to avoid rounding errors
+        subtotal = (total * 100 - tax * 100 - delivery * 100 + discount * 100) / 100  # calculating in integer numbers to avoid rounding errors
         ordersToInsert.append({
             'order_id': order['number'],
             'platform': 'wc',
@@ -308,6 +310,7 @@ try:
         connection.execute(lineItemsTable.insert(), lineItemsToInsert)
 except:
     logging.error(traceback.format_exc())
+    print('\n\nError in WooCommerce execution\n\n')
     print(traceback.format_exc())
 
 # Amazon orders
@@ -347,6 +350,7 @@ try:
     # Save the last order creation time to the config file
     config['amazon']['get orders after'] = getOrdersAfter
     json.dump(config, open(os.path.join(application_path, 'config.json'), 'w'))
+    print('Orders from Amazon (without line items yet) obtained')
 
     # For each order, create the dictionary in the destination table format
     for order in orders:
@@ -400,5 +404,5 @@ try:
         })
 except:
     logging.error(traceback.format_exc())
-    print('\n\nError in Amazon execution')
+    print('\n\nError in Amazon execution\n\n')
     print(traceback.format_exc())
