@@ -1,8 +1,7 @@
-import time
-
-import requests, datetime, json, base64, os, traceback, logging
+import time, datetime, json, base64, os, traceback, logging, urllib, hashlib, hmac
 from decimal import Decimal
 
+import requests
 from sqlalchemy import create_engine, text, MetaData, Table
 from woocommerce import API
 
@@ -50,18 +49,70 @@ def get_token(platform):
     return config[platform]['access_token']
 
 
+def amazon_sign(key, msg):
+    return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+
+
 def amazon_get_resource(url, params, resource):
     items = []
 
-    # Amazon docs for headers: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md#step-3-add-headers-to-the-uri
+    requestTimestamp = datetime.datetime.now().replace(microsecond=0).isoformat().replace('-', '').replace(':', '') + 'Z'
+
     headers = {
         'host': 'sellingpartnerapi-na.amazon.com',
+        'user-agent': 'Vanify Data',
         'x-amz-access-token': get_token('amazon'),
-        'x-amz-date': datetime.datetime.now().replace(microsecond=0).isoformat().replace('-', '').replace(':', '') + 'Z',
-        'user-agent': 'Vanify Data'
+        'x-amz-date': requestTimestamp
     }
 
-    # Amazon docs about requests frequency: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/usage-plans-rate-limits/Usage-Plans-and-Rate-Limits.md
+    # Amazon docs - Task 1: Create a canonical request for Signature Version 4
+    # https://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
+    httpRequestMethod = 'GET'
+    canonicalURI = '/' + '/'.join(url.split('/')[3:])  # e. g. '/orders/v0/orders'
+
+    uriItems = []
+    for key in sorted(params):
+        uriItems.append(urllib.parse.quote(str(key)) + '=' + urllib.parse.quote(str(params[key])))
+    canonicalQueryString = '&'.join(uriItems)
+
+    canonicalHeaders = ''
+    for key, value in headers.items():
+        canonicalHeaders += key.lower() + ':' + value.strip() + '\n'
+
+    signedHeaders = (';'.join(sorted(headers)) + '\n').lower()
+
+    hasfOfEmptyPayload = hashlib.sha256(''.encode('utf-8')).hexdigest()
+    canonicalRequest = httpRequestMethod + '\n' + canonicalURI + '\n' + canonicalQueryString + '\n' + \
+                       canonicalHeaders + '\n' + signedHeaders + '\n' + hasfOfEmptyPayload
+    canonicalRequestHash = hashlib.sha256(canonicalRequest.encode('utf-8')).hexdigest()
+
+    # Amazon docs - Task 2: Create a string to sign for Signature Version 4
+    # https://docs.aws.amazon.com/general/latest/gr/sigv4-create-string-to-sign.html
+    stringToSign = 'AWS4-HMAC-SHA256' + '\n' + \
+                   requestTimestamp + '\n' + \
+                   requestTimestamp[:8] + '/us-east-1/execute-api/aws4_request' + '\n' + \
+                   canonicalRequestHash
+
+    # Amazon docs - Task 3: Calculate the signature for AWS Signature Version 4
+    # https://docs.aws.amazon.com/general/latest/gr/sigv4-calculate-signature.html
+    kSecret = config['amazon']['aws_secret']
+    kDate = amazon_sign(('AWS4' + kSecret).encode('utf-8'), requestTimestamp[:8])
+    kRegion = amazon_sign(kDate, 'us-east-1')
+    kService = amazon_sign(kRegion, 'execute-api')
+    kSigning = amazon_sign(kService, 'aws4_request')
+
+    signature = bytes.hex(amazon_sign(kSigning, stringToSign))
+
+    # Amazon docs - Task 4: Add the signature to the HTTP request
+    # https://docs.aws.amazon.com/general/latest/gr/sigv4-add-signature-to-request.html
+    credential = config['amazon']['aws_id'] + '/' + requestTimestamp[:8] + '/us-east-1/execute-api/aws4_request'
+    headers['Authorization'] = f'AWS4-HMAC-SHA256 ' \
+                               f'Credential={credential}, ' \
+                               f'SignedHeaders={signedHeaders}, ' \
+                               f'Signature={signature}'
+
+    # Amazon docs about requests frequency:
+    # https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/usage-plans-rate-limits/Usage-Plans-and-Rate-Limits.md
     delay = 10
     while True:
         response = requests.get(url, params=params, headers=headers)
