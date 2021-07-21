@@ -53,8 +53,12 @@ def get_token(platform):
 def amazon_get_resource(url, params, resource):
     items = []
 
+    # Amazon docs for headers: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md#step-3-add-headers-to-the-uri
     headers = {
-        'Authorization': 'Bearer ' + get_token('amazon')
+        'host': 'sellingpartnerapi-na.amazon.com',
+        'x-amz-access-token': get_token('amazon'),
+        'x-amz-date': datetime.datetime.now().replace(microsecond=0).isoformat().replace('-', '').replace(':', '') + 'Z',
+        'user-agent': 'Vanify Data'
     }
 
     # Amazon docs about requests frequency: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/usage-plans-rate-limits/Usage-Plans-and-Rate-Limits.md
