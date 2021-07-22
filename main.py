@@ -8,7 +8,8 @@ from woocommerce import API
 
 def get_token(platform):
     # eBay docs: https://developer.ebay.com/api-docs/static/oauth-refresh-token-request.html
-    # Amazon docs: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md#step-1-request-a-login-with-amazon-access-token
+    # Amazon docs for refreshing token:
+    # https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md#step-1-request-a-login-with-amazon-access-token
     config = json.load(open(os.path.join(application_path, 'config.json')))
 
     # Update the access_token if it's expired
@@ -16,7 +17,8 @@ def get_token(platform):
         url = config[platform]['refresh_url']
         if platform == 'amazon':
             headers = {
-                'Content-Type': 'application/x-www-form-urlencoded',
+                'Host': 'api.amazon.com',
+                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
             }
             data = {
                 'grant_type': 'refresh_token',
@@ -37,6 +39,8 @@ def get_token(platform):
                 'scope': config[platform]['scope']
             }
         response = requests.post(url, headers=headers, data=data)
+        response.raise_for_status()
+
         config[platform]['access_token'] = response.json()['access_token']
         config[platform]['refresh_token'] = response.json().get('refresh_token', config[platform]['refresh_token'])
         config[platform]['best_before'] = (datetime.datetime.utcnow()
@@ -53,14 +57,14 @@ def amazon_sign(key, msg):
     return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
 
 
-def amazon_get_resource(url, params, resource):
-    items = []
+def amazon_get_headers(url, params):
+    config = json.load(open(os.path.join(application_path, 'config.json')))
 
-    requestTimestamp = datetime.datetime.now().replace(microsecond=0).isoformat().replace('-', '').replace(':', '') + 'Z'
+    requestTimestamp = datetime.datetime.utcnow().replace(microsecond=0).isoformat().replace('-', '').replace(':', '') + 'Z'
 
     headers = {
-        'host': 'sellingpartnerapi-na.amazon.com',
-        'user-agent': 'Vanify Data',
+        'host': 'sellingpartnerapi-eu.amazon.com',
+        'user-agent': 'Vanity Data/1.0 (Language=Python/3.8)',
         'x-amz-access-token': get_token('amazon'),
         'x-amz-date': requestTimestamp
     }
@@ -79,7 +83,7 @@ def amazon_get_resource(url, params, resource):
     for key, value in headers.items():
         canonicalHeaders += key.lower() + ':' + value.strip() + '\n'
 
-    signedHeaders = (';'.join(sorted(headers)) + '\n').lower()
+    signedHeaders = (';'.join(sorted(headers))).lower()
 
     hasfOfEmptyPayload = hashlib.sha256(''.encode('utf-8')).hexdigest()
     canonicalRequest = httpRequestMethod + '\n' + canonicalURI + '\n' + canonicalQueryString + '\n' + \
@@ -90,14 +94,14 @@ def amazon_get_resource(url, params, resource):
     # https://docs.aws.amazon.com/general/latest/gr/sigv4-create-string-to-sign.html
     stringToSign = 'AWS4-HMAC-SHA256' + '\n' + \
                    requestTimestamp + '\n' + \
-                   requestTimestamp[:8] + '/us-east-1/execute-api/aws4_request' + '\n' + \
+                   requestTimestamp[:8] + '/eu-west-1/execute-api/aws4_request' + '\n' + \
                    canonicalRequestHash
 
     # Amazon docs - Task 3: Calculate the signature for AWS Signature Version 4
     # https://docs.aws.amazon.com/general/latest/gr/sigv4-calculate-signature.html
     kSecret = config['amazon']['aws_secret']
     kDate = amazon_sign(('AWS4' + kSecret).encode('utf-8'), requestTimestamp[:8])
-    kRegion = amazon_sign(kDate, 'us-east-1')
+    kRegion = amazon_sign(kDate, 'eu-west-1')
     kService = amazon_sign(kRegion, 'execute-api')
     kSigning = amazon_sign(kService, 'aws4_request')
 
@@ -105,16 +109,23 @@ def amazon_get_resource(url, params, resource):
 
     # Amazon docs - Task 4: Add the signature to the HTTP request
     # https://docs.aws.amazon.com/general/latest/gr/sigv4-add-signature-to-request.html
-    credential = config['amazon']['aws_id'] + '/' + requestTimestamp[:8] + '/us-east-1/execute-api/aws4_request'
+    credential = config['amazon']['aws_id'] + '/' + requestTimestamp[:8] + '/eu-west-1/execute-api/aws4_request'
     headers['Authorization'] = f'AWS4-HMAC-SHA256 ' \
                                f'Credential={credential}, ' \
                                f'SignedHeaders={signedHeaders}, ' \
                                f'Signature={signature}'
 
+    return headers
+
+
+def amazon_get_resource(url, params, resource):
+    items = []
+
     # Amazon docs about requests frequency:
     # https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/usage-plans-rate-limits/Usage-Plans-and-Rate-Limits.md
     delay = 10
     while True:
+        headers = amazon_get_headers(url, params)
         response = requests.get(url, params=params, headers=headers)
         if response.status_code == 429:
             # If code is 429, Amazon throttles the API. We can try calling it again in a while
@@ -132,11 +143,22 @@ def amazon_get_resource(url, params, resource):
 
     # Continue getting the rest of the orders if there is a next page
     while response.json().get('NextToken'):
-        headers = {
-            'Authorization': 'Bearer ' + get_token('amazon')
-        }
         params['NextToken'] = response.json().get('NextToken')
-        response = requests.get(url, params=params, headers=headers)
+        delay = 10
+        while True:
+            headers = amazon_get_headers(url, params)
+            response = requests.get(url, params=params, headers=headers)
+            if response.status_code == 429:
+                # If code is 429, Amazon throttles the API. We can try calling it again in a while
+                print(f'Amazon API throttles the requests, waiting {str(delay)} seconds to call API again')
+                time.sleep(delay)
+                delay *= 2
+                continue
+            else:
+                # For other cases, check for errors and exit the loop
+                response.raise_for_status()
+                break
+
         for item in response.json()[resource]:
             items.append(item)
 
@@ -379,7 +401,7 @@ try:
     # Collect Amazon orders from Orders API
     # API docs: https://github.com/amzn/selling-partner-api-docs/blob/main/references/orders-api/ordersV0.md#getorders
     # How to get the refresh token: https://github.com/amzn/selling-partner-api-docs/blob/main/guides/en-US/developer-guide/SellingPartnerApiDeveloperGuide.md#Self-authorization
-    url = 'https://sellingpartnerapi-na.amazon.com/orders/v0/orders'
+    url = 'https://sellingpartnerapi-eu.amazon.com/orders/v0/orders'
     getOrdersAfter = config['amazon'].get('get orders after')
     if getOrdersAfter:
         params = {
@@ -410,7 +432,7 @@ try:
     # For each order, create the dictionary in the destination table format
     for order in orders:
         # Get the line items for this order
-        url = f'https://sellingpartnerapi-na.amazon.com/orders/v0/orders/{order["AmazonOrderId"]}/orderItems'
+        url = f'https://sellingpartnerapi-eu.amazon.com/orders/v0/orders/{order["AmazonOrderId"]}/orderItems'
         params = {}
         lineItems = amazon_get_resource(url, params, 'OrderItems')
 
